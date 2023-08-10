@@ -224,29 +224,40 @@ def pc_sampler(score_model, marginal_prob_std, diffusion_coeff, sampled_energies
   init_x = init_x*std_[:,None,None]
   time_steps = np.linspace(1., eps, num_steps)
   step_size = time_steps[0] - time_steps[1]
-  x = init_x
+  
 
+  padding_mask = (init_x[:,:,0]==-20).type(torch.bool)
+        
+  # Inverse mask to ignore models output for 0-padded hits in loss
+  output_mask = (init_x[:,:,0]!=-20).type(torch.int)
+  output_mask = output_mask.unsqueeze(-1)
+  output_mask = output_mask.expand(output_mask.size()[0], output_mask.size()[1],4)
+    
+  init_x = init_x * std_[:,None,None]
+  x = init_x
+  diffusion_step_ = 0
   with torch.no_grad():
     for time_step in time_steps:
       batch_time_step = torch.ones(batch_size, device=init_x.device) * time_step
-      
+      diffusion_step_+=1
       sampled_energies = sampled_energies.to(x.device, torch.float32)
       alpha = torch.ones_like(torch.tensor(time_step))
 
-      grad = score_model(x, batch_time_step, sampled_energies)
+      grad = score_model(x, batch_time_step, sampled_energies, mask=padding_mask)
       noise = torch.randn_like(x)
-
+      noise = noise * output_mask
+      grad = grad * output_mask
       flattened_scores = grad.reshape(grad.shape[0], -1)
-      grad_norm = torch.linalg.norm(flattened_scores, dim=-1).mean()
-      flattened_noise = noise.reshape(noise.shape[0], -1)
-      noise_norm = torch.linalg.norm(flattened_noise, dim=-1).mean()
-      langevin_step_size = (snr * noise_norm / grad_norm)**2 * 2 * alpha
+      grad_norm = torch.linalg.norm( flattened_scores, dim=-1 ).mean()
+      flattened_noise = noise.reshape(noise.shape[0],-1)
+      noise_norm = torch.linalg.norm( flattened_noise, dim=-1 ).mean()
+      langevin_step_size =  (snr * noise_norm / grad_norm)**2 * 2 * alpha
    
       x_mean = x + langevin_step_size* grad
       x = x_mean + torch.sqrt(2 * langevin_step_size) * noise
 
-      drift, diff = diffusion_coeff(x, batch_time_step)
-      x_mean = x + (diff**2)[:, None, None] * score_model(x, batch_time_step, sampled_energies) * step_size
+      drift, diff = diffusion_coeff(x,batch_time_step)
+      x_mean = x + (diff**2)[:, None, None] * score_model(x, batch_time_step, sampled_energies, mask=padding_mask) * step_size
       x = x_mean + torch.sqrt(diff**2 * step_size)[:, None, None] * torch.randn_like(x)
 
   return x_mean
